@@ -4,7 +4,7 @@ author: "Kate Colvin"
 date: "2026-02-13"
 output: pdf_document
 ---
-
+  
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
@@ -13,8 +13,12 @@ library(ggplot2)
 library(gtsummary)
 library(gridExtra)
 library(ggridges)
-library(cowplot)
+# library(cowplot)
 library(maps)
+library(gt)
+library(tigris)
+library(sf)
+library(purrr)
 
 ```
 
@@ -22,7 +26,8 @@ Loading in data
 
 ```{r}
 
-tract <- read_csv("tract_cbsa.csv")
+tract <- read_csv("tract_cbsa.csv") %>% 
+  mutate(dens_mult = dens*1000000)
 tract
 
 ```
@@ -31,17 +36,19 @@ Summary Table(s)
 
 ```{r}
 
+# Density: # pple per sq mile
+
 table1 <- tract %>% 
-  tbl_summary(include = c(pm25, hyads, bc, total, pct_pov, 
+  tbl_summary(include = c(pm25, hyads, bc, total, dens_mult, pct_pov, 
                           pct_white, pct_black, pct_asian, pct_hispanic),
               by = ruca_agg, 
               label = list(
                 pm25 ~ "PM 2.5",
                 hyads ~ "Coal Power Plant Impact (HyADS)",
                 bc ~ "Black Carbon",
-             #   area ~ "Land Area",
+              #  area ~ "Land Area (m)",
                 total ~ "Total Population",
-             #   dens ~ "Population Density",
+                dens_mult ~ "Population Density (per km^2)",
                 pct_pov ~ "Percent in Poverty (%)",
                 pct_white ~ "Percent White (%)",
                 pct_black ~ "Percent Black (%)",
@@ -52,9 +59,13 @@ table1 <- tract %>%
               missing = "no") %>% 
   add_p() %>% 
   add_overall() %>% 
-  bold_labels() 
+  bold_labels() %>% 
+  modify_caption("**Table 1**: Census Tract Characteristics, by RUCA Categorization")
 
 table1
+
+table1 <- table1 %>% as_gt()
+gtsave(table1, "results/table1.png")
 
 ```
 
@@ -169,7 +180,7 @@ tract_ridges <- tract %>%
                   "60-80%", 
                   "80-100%")))
 
-tract_ridges %>% ggplot(aes(x = pm25, y = white_group, fill = white_group)) +
+figure1 <- tract_ridges %>% ggplot(aes(x = pm25, y = white_group, fill = white_group)) +
    geom_density_ridges(
      alpha = 0.85,
      scale = 1.2,
@@ -181,6 +192,11 @@ tract_ridges %>% ggplot(aes(x = pm25, y = white_group, fill = white_group)) +
      title = "Distribution of PM2.5 by % of White Census Tract Population") +
    theme(legend.position = "none", 
          plot.title = element_text(size = 12))
+
+figure1
+
+ggsave(filename = "results/figure1.png", plot = figure1, 
+       width = 8, height = 5, dpi = 300)
 
 ```
 
@@ -246,7 +262,55 @@ map_2 <- ggplot(map_df, aes(long, lat, group = group, fill = pct_white_state)) +
 
 ```{r}
 
-grid.arrange(map_1, map_2, nrow = 2)
+# options(tigris_use_cache = TRUE)
+
+# states <- unique(tract$state_abb)
+# tract_shapes <- map_dfr(
+#   states,
+#   ~ tracts(state = .x, year = 2010, class = "sf")) %>%
+#   st_transform(4326)
+
+# saveRDS(tract_shapes, "tract_shapes_2010_us.rds")
+
+tract_shapes <- readRDS("tract_shapes_2010_us.rds")
+
+tract_map <- tract_shapes %>%
+  left_join(tract, by = c("GEOID10" = "geoid"))
+
+map_3 <- ggplot(tract_map) +
+  geom_sf(aes(fill = pm25), color = NA) +
+  scale_fill_gradient(low = "blue", high = "red", na.value = "grey90") +
+  theme_void() +
+  labs(
+    fill = "PM2.5",
+    title = "PM2.5 by Census Tract") +
+  theme(plot.title = element_text(size = 12))
+
+map_3
+
+```
+
+```{r}
+
+map_4 <- ggplot(tract_map) +
+  geom_sf(aes(fill = pct_white), color = NA) +
+  scale_fill_gradient(low = "red", high = "blue", na.value = "grey90") +
+  theme_void() +
+  labs(
+    fill = "% White",
+    title = "% White Population by Census Tract") +
+  theme(plot.title = element_text(size = 12))
+
+map_4
+
+```
+
+```{r}
+
+figure2 <- grid.arrange(map_1, map_3, map_2, map_4, nrow = 2)
+
+ggsave(filename = "results/figure2.png", plot = figure2, 
+       width = 8, height = 5, dpi = 300)
 
 ```
 
@@ -255,16 +319,22 @@ grid.arrange(map_1, map_2, nrow = 2)
 
 ```{r}
 
-race_long %>% 
+figure3 <- race_long %>% 
   ggplot(aes(x = percent, y = pm25, color = race)) +
   geom_point(alpha = 0.3) +
   geom_smooth(color = "black") +
   facet_wrap(~race) +
   theme_minimal() +
-  labs(title = "PM2.5 vs of % Census Tract Population",
+  labs(title = "PM2.5 vs. of % of Census Tract Population",
        x = "% of Census Tract Population",
        y = PM[2.5]~"Concentration (µg/m"^3*")") +
   theme(plot.title = element_text(size = 12))
+
+figure3
+
+ggsave(filename = "results/figure3.png", plot = figure3, 
+       width = 8, height = 5, dpi = 300)
+
 ```
 
 
@@ -300,8 +370,8 @@ ruca_2 <- tract %>% ggplot(aes(x = factor(ruca), y = pm25, color = factor(ruca))
 ruca_arrange <- grid.arrange(ruca_1, ruca_2, nrow = 2)
 ruca_arrange
 
-# ggsave(filename = "results/ruca_arrange.png", plot = ruca_arrange, 
-#       width = 8, height = 5, dpi = 300)
+ggsave(filename = "results/figure4.png", plot = ruca_arrange, 
+       width = 8, height = 5, dpi = 300)
 
 ```
 
@@ -312,7 +382,7 @@ Comparing RUCA to % White
 
 ```{r}
 
-tract %>% ggplot(aes(x = pct_white, y = ruca_agg, fill = ruca_agg)) +
+figure5 <- tract %>% ggplot(aes(x = pct_white, y = ruca_agg, fill = ruca_agg)) +
    geom_density_ridges(
      alpha = 0.85,
      scale = 1.2,
@@ -324,6 +394,8 @@ tract %>% ggplot(aes(x = pct_white, y = ruca_agg, fill = ruca_agg)) +
      title = "Distribution of % White Census Tracts by Rural-Urban Commuting Area Code") +
    theme(legend.position = "none", 
          plot.title = element_text(size = 12))
+
+figure5
 
 # ruca_4 <- tract %>% ggplot(aes(x = factor(ruca), y = pct_white, color = factor(ruca))) +
 #  geom_boxplot() +
@@ -337,6 +409,9 @@ tract %>% ggplot(aes(x = pct_white, y = ruca_agg, fill = ruca_agg)) +
 
 # ruca_arrange_white <- grid.arrange(ruca_3, ruca_4, nrow = 2)
 # ruca_arrange_white
+
+ggsave(filename = "results/figure5.png", plot = figure5, 
+       width = 8, height = 5, dpi = 300)
 
 ```
 
@@ -360,7 +435,7 @@ tract_ridges <- tract %>%
                   "60-80%", 
                   "80-100%")))
 
-tract_ridges %>% ggplot(aes(x = hyads, y = white_group, fill = white_group)) +
+figure_hyads <- tract_ridges %>% ggplot(aes(x = hyads, y = white_group, fill = white_group)) +
    geom_density_ridges(
      alpha = 0.85,
      scale = 1.2,
@@ -372,6 +447,11 @@ tract_ridges %>% ggplot(aes(x = hyads, y = white_group, fill = white_group)) +
      title = "Distribution of HyADS by % of White Census Tract Population") +
    theme(legend.position = "none", 
          plot.title = element_text(size = 12))
+
+figure_hyads
+
+ggsave(filename = "results/figure_hyads.png", plot = figure_hyads, 
+       width = 8, height = 5, dpi = 300)
 
 ```
 
@@ -390,7 +470,7 @@ tract_ridges <- tract %>%
                   "60-80%", 
                   "80-100%")))
 
-tract_ridges %>% ggplot(aes(x = bc, y = white_group, fill = white_group)) +
+figure_bc <- tract_ridges %>% ggplot(aes(x = bc, y = white_group, fill = white_group)) +
    geom_density_ridges(
      alpha = 0.85,
      scale = 1.2,
@@ -402,6 +482,11 @@ tract_ridges %>% ggplot(aes(x = bc, y = white_group, fill = white_group)) +
      title = "Distribution of Black Carbon Concentration by % of White Census Tract Population") +
    theme(legend.position = "none", 
          plot.title = element_text(size = 12))
+
+figure_bc
+
+ggsave(filename = "results/figure_bc.png", plot = figure_bc, 
+       width = 8, height = 5, dpi = 300)
 
 ```
 
