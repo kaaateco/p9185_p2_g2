@@ -1,0 +1,239 @@
+---
+title: "chhiring_analysis"
+author: "Chhiring Lama"
+date: "2026-02-17"
+output:
+  pdf_document:
+    extra_dependencies: ["float"]
+    toc: yes
+    toc_depth: 2
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyhead[R]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+- \usepackage{enumitem}
+- \usepackage{float}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      fig.align = "center")
+
+library(readxl)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(table1)
+library(janitor)
+library(patchwork)
+library(gridExtra)
+library(lattice)
+library(nlme)
+library(broom.mixed)
+library(gtsummary)
+library(tigris)
+library(sf)
+library(maps)
+library(lme4)
+library(corrplot)
+library(DHARMa)
+library(gt)
+library(glmmTMB)
+library(performance)
+library(sjPlot)
+
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+options(scipen = 999)
+```
+
+```{r, warning=FALSE, message=FALSE}
+tract <- read_csv("tract_cbsa.csv")
+tract <- tract |> 
+  mutate(dens = dens *1000000)
+state_included <-unique(tract$state_abb)
+missing = setdiff(state.abb, state_included)
+```
+The following states' data are missing: `r missing`. Alaska and Hawaii are not included since the dataset is specifically focusing on contiguous US states. 
+
+What about MA and WY?
+
+In the EDA, we see that neighboring states have similar % white residents. Similarly, northern states generally have higher % of white residents. 
+
+There are only 380 CBSA included out of ~900 out of them in contigous US. This only 337 Metropolitan areas (missing 26) (population: 50k+) and 43 micropolitan areas. **Why?** There are 4 census tracts without CBSA allocation. One Census tract in CA missing PM2.5 and BC information.
+```{r, fig.width =5, fig.height = 10, fig.align='center'}
+options(tigris_use_cache = TRUE)
+
+# Download CBSA shapes for 2023
+cbsa_sf <- core_based_statistical_areas(cb = TRUE, year = 2010, class = "sf") 
+states_sf <- states(cb = TRUE)
+contiguous_states <- states_sf %>%
+  filter(!STUSPS %in% c("AK", "HI", "PR"))
+contiguous_cbsas_spatial <- st_filter(cbsa_sf, contiguous_states)
+
+contiguous_cbsas_spatial <- contiguous_cbsas_spatial |> 
+  mutate(present = case_when(
+    `CBSA` %in% c(tract$cbsa_id) ~ "Data Present",
+    TRUE ~ "Data Missing"),
+    `present` = fct_relevel(`present`, "Data Present"),
+         `CBSA` = as.numeric(`CBSA`), 
+         `LSAD` = fct_relevel(`LSAD`, "Micro", "Metro")) 
+
+ggplot(data = contiguous_cbsas_spatial) +
+  geom_sf(aes(fill = `LSAD`), color = "grey", size = 0.1) +
+  theme_void() +
+  labs(title = "US Core Based Statistical Areas (CBSAs)", 
+       fill = "Area Type") +
+  facet_wrap(~present, ncol = 1)
+```
+
+```{r, fig.width = 5, fig.height =3}
+coords <- st_coordinates(cbsa_sf)
+coords_df <- as.data.frame(coords)
+coords_df <- cbind(
+  cbsa_sf[coords_df$L3, ] |> st_drop_geometry(),
+  coords_df
+) |> 
+  as_tibble()
+
+cbsa_pm2.5_summary <- tract %>%
+  group_by(`cbsa_id`) %>%
+  summarise(mean_pm = mean(pm25, na.rm = TRUE)) |> 
+  drop_na()
+
+cbsa_map_data <- coords_df |> 
+  mutate(`CBSA` = as.numeric(`CBSA`)) |> 
+  right_join(cbsa_pm2.5_summary, by = c("CBSA" = "cbsa_id"))
+
+ggplot(cbsa_map_data, aes(`X`, `Y`, group = CBSA, fill = mean_pm)) +
+  geom_polygon(color = "white", size = 0.2) +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_void()
+```
+
+Caveat: there are census tracts where total percentage of different groups don't add up. The data potentially is missing other racial/ethnic groups. 
+```{r, fig.height=3.5, fig.align = "center"}
+cor_dat <- tract[, c(8:11, 13, 18:22)] |> 
+  mutate(bc = as.numeric(bc)) |> 
+  drop_na()
+cor_matrix <- cor(cor_dat, method = "pearson")
+corrplot(cor_matrix, method = "circle") 
+```
+
+Percentage of white and percentage of population under poverty line are correlated. We need to account for this when modeling. 
+
+Running LMM with hierarchical structure 
+```{r}
+nested_mod <- lmerTest::lmer(pm25 ~ pct_white*pct_pov 
+                             + ruca_agg + dens + bc*hyads + (1 | state_abb/cbsa_id),
+                     data = tract)
+tbl_regression(
+  nested_mod,
+  intercept = TRUE) |> 
+  bold_p() |> 
+  bold_labels() |> 
+  as_gt() |> 
+  tab_options(latex.tbl.pos = "h")
+```
+
+Checking random effects too
+```{r, fig.height=4}
+re <- ranef(nested_mod, condVar = TRUE)
+
+# Example: CBSA intercepts (nested in state)
+cbsa_re <- re$`cbsa_id:state_abb`  # random intercepts for CBSAs
+
+cbsa_re <- cbsa_re %>%
+  rownames_to_column(var = "cbsa_id") %>%
+  rename(random_intercept = `(Intercept)`)
+
+ggplot(cbsa_re, aes(x = random_intercept)) +
+  geom_histogram(binwidth = 0.1, fill = "steelblue", color = "white") +
+  theme_minimal() +
+  labs(title = "Distribution of Random Intercepts (CBSAs)",
+       x = "Random Intercept (Deviation from Overall Intercept)",
+       y = "Count")
+```
+
+CBSA RI within each state
+```{r, fig.height=4}
+re_cbsa <- ranef(nested_mod, condVar = TRUE)$`cbsa_id:state_abb`
+re_sd <- attr(re_cbsa, "postVar")[1,,] |> sqrt()  # standard deviation for intercept
+
+cbsa_re <- tibble(
+  cbsa_id = rownames(re_cbsa),
+  random_intercept = re_cbsa$`(Intercept)`,
+  sd = re_sd
+)
+
+ggplot(cbsa_re, aes(x = reorder(cbsa_id, random_intercept), y = random_intercept)) +
+  geom_errorbar(aes(ymin = random_intercept - 1.96*sd,
+                    ymax = random_intercept + 1.96*sd), width = 0.2, alpha = 0.4) +
+  geom_point(color = "steelblue", size = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(title = "Random Intercepts with 95% CI (CBSA)",
+       x = "CBSA",
+       y = "Random Intercept") +
+  theme_classic() +
+  theme(
+  axis.text.y = element_blank())
+```
+
+State-level RI
+```{r, fig.height=5, fig.width=5}
+state_re <- ranef(nested_mod)$state_abb %>%
+  rownames_to_column(var = "state_abb") %>%
+  rename(random_intercept = `(Intercept)`)
+
+ggplot(state_re, aes(x = reorder(state_abb, random_intercept), y = random_intercept)) +
+  geom_point(color = "darkred") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(title = "Random Intercepts by State",
+       x = "State",
+       y = "Random Intercept") +
+  theme_classic()+
+  theme(
+  axis.text.y = element_text(size = 7))
+```
+
+### Model Diagnostics
+```{r, fig.height=10, fig.width=7,  fig.align='left'}
+check_model(nested_mod)
+```
+
+### Prediction 
+```{r, fig.height=3, fig.width=4}
+plot_model(nested_mod, type = "pred")
+```
+
+Interaction Term
+```{r, fig.height=3, fig.width=4}
+plot_model(nested_mod, type = "int") +
+  #geom_hline(yintercept = 0, color = "black", linetype = 2, linewidth = 0.5) +
+  theme_classic()
+```
+
+```{r}
+nested_mod2 <- lmerTest::lmer(pm25 ~ pct_white*pct_pov + ruca + dens + 
+                              area + bc + hyads + (1| cbsa_id) + (1 | state_abb), 
+                              data = tract)
+```
+
+```{r}
+anova(nested_mod2, nested_mod)
+```
+
+
