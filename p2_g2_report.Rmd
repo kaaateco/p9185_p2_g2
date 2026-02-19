@@ -1,0 +1,22 @@
+---
+title: "p2_g2_report"
+date: "2026-02-19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+```
+
+# Appendix 
+
+## EDA Section
+
+```{r}
+
+
+
+
+```
+
