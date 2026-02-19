@@ -128,10 +128,10 @@ cc_model <- lmer(
 
 ## Model diagnostics  
 
-  check_model(cc_model)
-  model_performance(cc_model)
-
+model_plots <-  check_model(cc_model)
  
+model_performance(cc_model)
+
 
 model_tbl <- tbl_regression(
   cc_model,
