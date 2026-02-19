@@ -1,0 +1,252 @@
+---
+title: "p9185_project2"
+author: "Wuraola"
+date: "2026-02-17"
+output: html_document
+---
+
+# Load libraries
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(lme4)
+library(glmmTMB)
+library(broom.mixed)
+library(ggplot2)
+library(performance)
+library(gtsummary)
+library(car)
+library(fixest)
+library(broom.helpers)
+
+```
+
+
+# Import data and quick check
+```{r}
+
+cbsa_data  <- read.csv("C:/Users/wuras/Downloads/tract_cbsa.csv") %>% mutate(state_fips = factor(state_fips),
+state_abb = factor(state_abb) ,
+county_fips = factor(county_fips),
+geoid = factor(geoid)    ,
+cbsa_id = factor(cbsa_id)   ,
+ruca = factor(ruca)     ,
+ruca_agg = factor(ruca_agg),
+new_density = total/(area/1000000))
+
+
+## Check the distinct count of states, cbsa, census tracts and county
+
+n_distinct(cbsa_data$state_abb) ## No Massachusetts, Wyoming
+n_distinct(cbsa_data$cbsa_id)
+n_distinct(cbsa_data$county_fips)
+n_distinct(cbsa_data$geoid)
+
+## Check for missingness in outcome
+
+sum(is.na(cbsa_data$pm25)) # 1 missing
+
+## Check the distribution of outcome
+
+hist(cbsa_data$pm25) ## normal data
+
+
+## Check whether data is actually nested or cross classified
+
+### 1. Does each tract belong to one CBSA?
+
+cbsa_data %>%
+  group_by(geoid) %>%
+  summarise(n_cbsa = n_distinct(cbsa_id)) %>%
+  filter(n_cbsa > 1) ## Truly nested
+
+### 2. Does each CBSA belong to only ONE state
+cbsa_data %>%
+  group_by(cbsa_id) %>%
+  summarise(n_states = n_distinct(state_fips)) %>%
+  filter(n_states > 1) ## 43 cbsa_ids appear in more than 1 state; not truly nested
+
+
+## Check correlations and multicolinearity
+
+### Correlation
+cor(cbsa_data[, c("pct_white","pct_hispanic","pct_black", "pct_pov", "dens", "bc", "pm25", "hyads")], use = "complete.obs")
+
+
+### Multicolinearity using non-nested model
+
+vif(lm(pm25 ~ pct_white + pct_hispanic + pct_black + pct_pov + ruca_agg + dens + bc + hyads, data = cbsa_data))
+
+```
+
+
+# Modeling
+## Model Approach 1: Cross-Classified Multilevel Model (CCMM) 
+```{r}
+
+# Justification:
+
+# Each tract belongs to one CBSA
+# Each tract belongs to one state
+# But CBSAs and states are not truly nested within each other i.e., cbsa crosses state boundaries
+      ## So tracts are simultaneously classified by:
+            ## Tract ∈ CBSA
+            ## Tract ∈ State
+# Can compute between cbsa and state variances as well as within tract variances
+
+# Limitations:
+
+## Assumes normal random effects
+## It doesn't handle spatial autocorrelation
+## If state doesn't contribute any variance it becomes an unneccessarily model complex with no benefit
+
+
+## Simple model with no interaction terms 
+cc_model1 <- lmer(
+  pm25 ~ pct_white + pct_black + pct_pov + ruca_agg + new_density + bc +
+    (1 | cbsa_id) +
+    (1 | state_abb),
+  data = cbsa_data
+)
+
+
+## Model with interaction terms and no black pct_black
+cc_model <- lmer(
+  pm25 ~ pct_white*pct_pov + ruca_agg + new_density + bc*hyads + 
+    (1 | cbsa_id) +
+    (1 | state_abb),
+  data = cbsa_data)
+
+ tidy(cc_model,  conf.int = TRUE) %>% knitr::kable() 
+
+## Compare models
+ anova(cc_model1, cc_model)
+
+## Model diagnostics  
+
+  check_model(cc_model)
+  model_performance(cc_model)
+
+ 
+
+model_tbl <- tbl_regression(
+  cc_model,
+  conf.int = TRUE,
+  estimate_fun = function(x) sprintf("%.4f", x),
+  label = list(pct_white ~ "Percent White in pop",
+               pct_pov ~ "Percent pop in pov",
+               ruca_agg ~ "Rural-Urban Commuting Area",
+               new_density ~ "Density (people/sq km)",
+               bc ~ "Black carbon conc",
+               hyads ~ "HyADS"
+               #pct_white:pct_pov ~ "White X pov",
+               #bc:hyads ~ " Black carbon X HyADS"
+               )
+) %>%
+  bold_labels() %>%  modify_header(label ~ "Term") %>%  # rename 'Characteristic' -> 'Term'
+  modify_caption("**Cross-Classified Mixed Effects Model for PM2.5**") 
+
+
+model_tbl
+
+ as_gt(model_tbl) %>%
+  gt::gtsave("model_ccmm_results.docx")
+
+
+## Compute ICCs (Cross-Classified Version)
+vc <- as.data.frame(VarCorr(cc_model))
+
+var_cbsa  <- vc$vcov[vc$grp == "cbsa_id"]
+var_state <- vc$vcov[vc$grp == "state_abb"]
+var_resid <- vc$vcov[vc$grp == "Residual"]
+
+icc_cbsa  <- var_cbsa / (var_cbsa + var_state + var_resid)
+icc_state <- var_state / (var_cbsa + var_state + var_resid)
+
+## Check Random Effects Distribution
+
+ranef_vals <- ranef(cc_model)
+hist(ranef_vals$cbsa_id[[1]])
+hist(ranef_vals$state_abb[[1]])
+
+## check Residual Diagnostics
+
+plot(cc_model)
+qqnorm(resid(cc_model))
+qqline(resid(cc_model))
+
+  
+
+
+```
+
+
+
+## Model Approach 2: Multiway Cluster-Robust SE
+```{r}
+
+# Justifications:
+## This computes two-way clustered standard errors:
+## Clustered by CBSA
+## Clustered by State
+## Correcting for overlapping membership
+
+# Limitations
+## Does not estimate variance at CBSA or state level.
+  ## Cannot ICC: cannot attribute any variation to CBSA or state
+## Does NOT add CBSA or state intercepts
+## No cluster-level estimates
+## Does NOT change coefficient estimates
+## Leaves the model as simple OLS.
+  ## Only adjusts standard errors
+  ## Only adjusts the variance-covariance matrix.
+  ## Assumes independence across clusters
+
+cr_model <- feols(
+  pm25 ~ pct_white*pct_pov + ruca_agg + new_density + bc*hyads,
+  data = cbsa_data,
+  cluster = ~ cbsa_id + state_abb)
+
+summary(cr_model)
+
+cr_tbl <- tbl_regression(
+  cr_model,
+  conf.int = TRUE,
+  estimate_fun = function(x) sprintf("%.4f", x),
+  label = list(pct_white ~ "Percent White in pop",
+               pct_pov ~ "Percent pop in pov",
+               ruca_agg ~ "Rural-Urban Commuting Area",
+               new_density ~ "Density (people/sq km)",
+               bc ~ "Black carbon conc",
+               hyads ~ "HyADS"
+               #pct_white:pct_pov ~ "White X pov",
+               #bc:hyads ~ " Black carbon X HyADS"
+               )
+) %>%
+  bold_labels() %>%  modify_header(label ~ "Term") %>%  # rename 'Characteristic' -> 'Term'
+  modify_caption("**Multiway cluster adjusted SE Model for PM2.5**") 
+
+## Model diagnostics
+
+### compare cluster SEs
+
+summary(cr_model, cluster = "cbsa_id")
+summary(cr_model, cluster = "state_abb")
+summary(cr_model, cluster = ~ cbsa_id + state_abb)
+
+
+## Quick model comparison using AIC and BIC
+
+AIC(cr_model)
+BIC(cr_model)
+AIC(cc_model)
+BIC(cc_model)
+
+
+```
+
+
