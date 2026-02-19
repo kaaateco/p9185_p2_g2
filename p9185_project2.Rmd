@@ -14,6 +14,7 @@ library(tidyverse)
 library(dplyr)
 library(readxl)
 library(lme4)
+library(lmerTest)
 library(glmmTMB)
 library(broom.mixed)
 library(ggplot2)
@@ -22,6 +23,7 @@ library(gtsummary)
 library(car)
 library(fixest)
 library(broom.helpers)
+
 
 ```
 
@@ -34,7 +36,7 @@ state_abb = factor(state_abb) ,
 county_fips = factor(county_fips),
 geoid = factor(geoid)    ,
 cbsa_id = factor(cbsa_id)   ,
-ruca = factor(ruca)     ,
+#ruca = factor(ruca)     ,
 ruca_agg = factor(ruca_agg),
 new_density = total/(area/1000000))
 
@@ -71,10 +73,28 @@ cbsa_data %>%
   filter(n_states > 1) ## 43 cbsa_ids appear in more than 1 state; not truly nested
 
 
+cbsa_data %>%
+  group_by(cbsa_id) %>%
+  summarise(n_states = factor(n_distinct(state_fips))) %>% ggplot(aes(n_states)) + geom_bar() + labs(
+    #title = "Count of CBSA ",
+    x = "Number of states",        # x-axis label
+    y = "CBSA count"    # y-axis label
+  ) + theme_minimal() + scale_fill_viridis_d()
+
+
+
+  labs(
+    title = "Example Bar Plot",
+    x = "Category",        # x-axis label
+    y = "Count / Value"    # y-axis label
+  ) +
+  theme_minimal()
+
+
 ## Check correlations and multicolinearity
 
 ### Correlation
-cor(cbsa_data[, c("pct_white","pct_hispanic","pct_black", "pct_pov", "dens", "bc", "pm25", "hyads")], use = "complete.obs")
+cor(cbsa_data[, c("pct_white","pct_hispanic","pct_black", "pct_pov", "new_density", "bc", "pm25", "ruca", "hyads")], use = "complete.obs")
 
 
 ### Multicolinearity using non-nested model
@@ -86,7 +106,7 @@ vif(lm(pm25 ~ pct_white + pct_hispanic + pct_black + pct_pov + ruca_agg + dens +
 
 # Modeling
 ## Model Approach 1: Cross-Classified Multilevel Model (CCMM) 
-```{r}
+```{r, fig.height=15, fig.width=10,  fig.align='left'}
 
 # Justification:
 
@@ -107,42 +127,58 @@ vif(lm(pm25 ~ pct_white + pct_hispanic + pct_black + pct_pov + ruca_agg + dens +
 
 ## Simple model with no interaction terms 
 cc_model1 <- lmer(
-  pm25 ~ pct_white + pct_black + pct_pov + ruca_agg + new_density + bc +
-    (1 | cbsa_id) +
-    (1 | state_abb),
+  pm25 ~ pct_white*pct_pov  +   ruca_agg + new_density + 
+    #(1 | cbsa_id) +
+    (1 | state_abb/cbsa_id),
   data = cbsa_data
 )
 
 
+
 ## Model with interaction terms and no black pct_black
 cc_model <- lmer(
-  pm25 ~ pct_white*pct_pov + ruca_agg + new_density + bc*hyads + 
+  pm25 ~ pct_white*pct_pov +  ruca_agg + new_density + 
     (1 | cbsa_id) +
     (1 | state_abb),
   data = cbsa_data)
 
- tidy(cc_model,  conf.int = TRUE) %>% knitr::kable() 
+summary(cc_model)
+
+ #tidy(cc_model,  conf.int = TRUE) %>% knitr::kable() 
 
 ## Compare models
  anova(cc_model1, cc_model)
 
 ## Model diagnostics  
 
-model_plots <-  check_model(cc_model)
+#model_plots <-  check_model(cc_model)
+ 
+ library(performance)
+
+compare_performance(cc_model1, cc_model)
+
+
+# Open a high-res device
+png("cclmm_diagnostics.png", width = 14*300, height = 14*300, res = 300)  # width*res = pixels
+check_model(cc_model)
+dev.off()
+
  
 model_performance(cc_model)
 
+summary(cc_model)
 
 model_tbl <- tbl_regression(
   cc_model,
+  intercept = TRUE,
   conf.int = TRUE,
   estimate_fun = function(x) sprintf("%.4f", x),
   label = list(pct_white ~ "Percent White in pop",
                pct_pov ~ "Percent pop in pov",
                ruca_agg ~ "Rural-Urban Commuting Area",
-               new_density ~ "Density (people/sq km)",
-               bc ~ "Black carbon conc",
-               hyads ~ "HyADS"
+               new_density ~ "Density (people/sq km)"
+               #bc ~ "Black carbon conc",
+               #hyads ~ "HyADS"
                #pct_white:pct_pov ~ "White X pov",
                #bc:hyads ~ " Black carbon X HyADS"
                )
@@ -154,33 +190,33 @@ model_tbl <- tbl_regression(
 model_tbl
 
  as_gt(model_tbl) %>%
-  gt::gtsave("model_ccmm_results.docx")
+  gt::gtsave("model_ccmm_results.png")
 
 
 ## Compute ICCs (Cross-Classified Version)
-vc <- as.data.frame(VarCorr(cc_model))
+#vc <- as.data.frame(VarCorr(cc_model))
 
-var_cbsa  <- vc$vcov[vc$grp == "cbsa_id"]
-var_state <- vc$vcov[vc$grp == "state_abb"]
-var_resid <- vc$vcov[vc$grp == "Residual"]
+#var_cbsa  <- vc$vcov[vc$grp == "cbsa_id"]
+#var_state <- vc$vcov[vc$grp == "state_abb"]
+#var_resid <- vc$vcov[vc$grp == "Residual"]
 
-icc_cbsa  <- var_cbsa / (var_cbsa + var_state + var_resid)
-icc_state <- var_state / (var_cbsa + var_state + var_resid)
+#icc_cbsa  <- var_cbsa / (var_cbsa + var_state + var_resid)
+#icc_state <- var_state / (var_cbsa + var_state + var_resid)
 
 ## Check Random Effects Distribution
 
 ranef_vals <- ranef(cc_model)
-hist(ranef_vals$cbsa_id[[1]])
-hist(ranef_vals$state_abb[[1]])
+hist(ranef_vals$cbsa_id[[1]], main="", xlab="Random effect: CBSA")
+hist(ranef_vals$state_abb[[1]], main="", xlab="Random effect: State")
 
 ## check Residual Diagnostics
 
-plot(cc_model)
-qqnorm(resid(cc_model))
-qqline(resid(cc_model))
+#plot(cc_model)
+#qqnorm(resid(cc_model))
+#qqline(resid(cc_model))
 
-  
 
+model_plots
 
 ```
 
@@ -207,7 +243,7 @@ qqline(resid(cc_model))
   ## Assumes independence across clusters
 
 cr_model <- feols(
-  pm25 ~ pct_white*pct_pov + ruca_agg + new_density + bc*hyads,
+  pm25 ~ pct_white*pct_pov + ruca_agg + new_density,
   data = cbsa_data,
   cluster = ~ cbsa_id + state_abb)
 
@@ -215,20 +251,25 @@ summary(cr_model)
 
 cr_tbl <- tbl_regression(
   cr_model,
+  intercept= TRUE,
   conf.int = TRUE,
   estimate_fun = function(x) sprintf("%.4f", x),
   label = list(pct_white ~ "Percent White in pop",
                pct_pov ~ "Percent pop in pov",
                ruca_agg ~ "Rural-Urban Commuting Area",
-               new_density ~ "Density (people/sq km)",
-               bc ~ "Black carbon conc",
-               hyads ~ "HyADS"
+               new_density ~ "Density (people/sq km)"
+               #bc ~ "Black carbon conc",
+               #hyads ~ "HyADS"
                #pct_white:pct_pov ~ "White X pov",
                #bc:hyads ~ " Black carbon X HyADS"
                )
 ) %>%
   bold_labels() %>%  modify_header(label ~ "Term") %>%  # rename 'Characteristic' -> 'Term'
   modify_caption("**Multiway cluster adjusted SE Model for PM2.5**") 
+
+as_gt(cr_tbl) %>%
+  gt::gtsave("model_crse_results.png")
+
 
 ## Model diagnostics
 
