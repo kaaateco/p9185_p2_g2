@@ -192,12 +192,90 @@ figure1 <- tract_ridges %>% ggplot(aes(x = pm25, y = white_group, fill = white_g
    theme(legend.position = "none", 
          plot.title = element_text(size = 12))
 
-figure1
+# figure1
 
-ggsave(filename = "results/figure1.png", plot = figure1, 
+# ggsave(filename = "results/figure1.png", plot = figure1, 
+ #       width = 8, height = 5, dpi = 300)
+
+```
+
+```{r}
+
+tract_ridges <- tract %>%
+   filter(!is.na(bc), !is.na(pct_white)) %>%
+   mutate(
+     white_group = ntile(pct_white, 5),
+     white_group = factor(
+       white_group,
+       levels = 1:5,
+       labels = c("0-20%", 
+                  "20-40%",
+                  "40-60%",
+                  "60-80%", 
+                  "80-100%")))
+
+figure_bc <- tract_ridges %>% ggplot(aes(x = bc, y = white_group, fill = white_group)) +
+   geom_density_ridges(
+     alpha = 0.85,
+     scale = 1.2,
+     color = "white") +
+   theme_minimal() +
+   labs(
+     x = "Total Black Carbon Concentration",
+     y = "% White",
+     title = "Distribution of Black Carbon Concentration by % of White Census Tract Population") +
+   theme(legend.position = "none", 
+         plot.title = element_text(size = 12))
+
+```
+
+```{r}
+
+# HyADS 
+
+tract_ridges <- tract %>%
+   filter(!is.na(hyads), !is.na(pct_white)) %>%
+   mutate(
+     white_group = ntile(pct_white, 5),
+     white_group = factor(
+       white_group,
+       levels = 1:5,
+       labels = c("0-20%", 
+                  "20-40%",
+                  "40-60%",
+                  "60-80%", 
+                  "80-100%")))
+
+figure_hyads <- tract_ridges %>% ggplot(aes(x = hyads, y = white_group, fill = white_group)) +
+   geom_density_ridges(
+     alpha = 0.85,
+     scale = 1.2,
+     color = "white") +
+   theme_minimal() +
+   labs(
+     x = "HyADS (Impact of Coal-Fired Power Plants)",
+     y = "% White",
+     title = "Distribution of HyADS by % of White Census Tract Population") +
+   theme(legend.position = "none", 
+         plot.title = element_text(size = 12))
+
+figure_hyads
+
+ggsave(filename = "results/figure_hyads.png", plot = figure_hyads, 
        width = 8, height = 5, dpi = 300)
 
 ```
+
+```{r}
+
+figure1_combined <- grid.arrange(figure1, figure_bc, figure_hyads, nrow = 3)
+figure1_combined
+
+ggsave(filename = "results/figure1_combined.png", plot = figure1_combined, 
+       width = 8, height = 11, dpi = 300)
+
+```
+
 
 ## Figure 2
 
@@ -223,11 +301,14 @@ map_df <- states_map %>%
 map_1 <- ggplot(map_df, aes(long, lat, group = group, fill = mean_pm)) +
   geom_polygon(color = "white", size = 0.2) +
   coord_fixed(1.3) +
-  scale_fill_gradient(low = "blue", high = "red") +
+#  scale_fill_gradient(low = "blue", high = "red") +
+  scale_fill_viridis_c(option = "viridis", na.value = "grey90") +
   theme_void() +
   labs(fill = "PM2.5",
        title = "Mean PM2.5 by State") +
   theme(plot.title = element_text(size = 12))
+
+map_1
 
 ```
 
@@ -250,7 +331,8 @@ map_df <- states_map %>%
 map_2 <- ggplot(map_df, aes(long, lat, group = group, fill = pct_white_state)) +
   geom_polygon(color = "white", linewidth = 0.2) +
   coord_fixed(1.3) +
-  scale_fill_gradient(low = "red", high = "blue") +
+  # scale_fill_gradient(low = "red", high = "blue") +
+  scale_fill_viridis_c(option = "viridis", na.value = "grey90") +
   theme_void() +
   labs(fill = "% White",
        title = "% White Population by State") +
@@ -278,7 +360,8 @@ tract_map <- tract_shapes %>%
 
 map_3 <- ggplot(tract_map) +
   geom_sf(aes(fill = pm25), color = NA) +
-  scale_fill_gradient(low = "blue", high = "red", na.value = "grey90") +
+ # scale_fill_gradient(low = "blue", high = "red", na.value = "grey90") +
+  scale_fill_viridis_c(option = "viridis", na.value = "grey90") + 
   theme_void() +
   labs(
     fill = "PM2.5",
@@ -293,7 +376,8 @@ map_3
 
 map_4 <- ggplot(tract_map) +
   geom_sf(aes(fill = pct_white), color = NA) +
-  scale_fill_gradient(low = "red", high = "blue", na.value = "grey90") +
+ # scale_fill_gradient(low = "red", high = "blue", na.value = "grey90") +
+  scale_fill_viridis_c(option = "viridis", na.value = "grey90") +
   theme_void() +
   labs(
     fill = "% White",
@@ -482,10 +566,46 @@ figure_bc <- tract_ridges %>% ggplot(aes(x = bc, y = white_group, fill = white_g
    theme(legend.position = "none", 
          plot.title = element_text(size = 12))
 
-figure_bc
+# figure_bc
 
-ggsave(filename = "results/figure_bc.png", plot = figure_bc, 
-       width = 8, height = 5, dpi = 300)
+# ggsave(filename = "results/figure_bc.png", plot = figure_bc, 
+#        width = 8, height = 5, dpi = 300)
+
+```
+
+
+## Bar plot she suggested; racial groups per percentile of PM2.5 exposure 
+
+```{r}
+
+pm_long <- race_long %>%
+  filter(!is.na(pm25)) %>% 
+  mutate(pm25_percentile = ntile(pm25, 5)) %>% 
+  mutate(pm25_percentile = factor(
+    pm25_percentile,
+       levels = 1:5,
+       labels = c("0-20%", 
+                  "20-40%",
+                  "40-60%",
+                  "60-80%", 
+                  "80-100%")))
+
+figure_pm_bar <- ggplot(pm_long, aes(x = factor(pm25_percentile),
+                 y = percent,
+                 fill = race)) +
+  geom_bar(stat = "identity", position = "stack") +
+  # facet_wrap(~ ruca_agg) +
+  labs(x = "PM2.5 Percentile",
+       y = "Proportion",
+       fill = "Race",
+       title = "Racial Composition by PM2.5 Exposure Percentile") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 12))
+
+figure_pm_bar
+
+ggsave(filename = "results/figure_pm_bar.png", plot = figure_pm_bar, 
+        width = 8, height = 5, dpi = 300)
 
 ```
 
