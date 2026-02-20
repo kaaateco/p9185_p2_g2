@@ -5,17 +5,279 @@ output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
+
 knitr::opts_chunk$set(echo = FALSE)
 
+library(tidyverse)
+library(ggplot2)
+library(gtsummary)
+library(gridExtra)
+library(ggridges)
+library(maps)
+library(gt)
+library(tigris)
+library(sf)
+library(purrr)
+
 ```
+
+\newpage
 
 # Appendix 
 
 ## EDA Section
 
+```{r, include = FALSE}
+
+tract <- read_csv("tract_cbsa.csv") %>% 
+  mutate(dens_mult = dens*1000000)
+
+# Long format race data
+race_long <- tract %>%
+  select(pct_white, pct_black, pct_asian, pct_hispanic, pm25) %>%
+  pivot_longer(
+    cols = starts_with("pct"),
+    names_to = "race",
+    values_to = "percent") %>% 
+  mutate(race = recode(race,
+                       pct_white = "White",
+                       pct_black = "Black",
+                       pct_asian = "Asian",
+                       pct_hispanic = "Hispanic"))
+
+```
+
+**Table 1**: Census Tract Characteristics, by RUCA Categorization -- Median (Q1, Q3)
+
 ```{r}
 
+table1 <- tract %>% 
+  tbl_summary(include = c(pm25, hyads, bc, total, dens_mult, pct_pov, 
+                          pct_white, pct_black, pct_asian, pct_hispanic),
+              by = ruca_agg, 
+              label = list(
+                pm25 ~ "PM 2.5",
+                hyads ~ "Coal Power Plant Impact (HyADS)",
+                bc ~ "Black Carbon",
+              #  area ~ "Land Area (m)",
+                total ~ "Total Population",
+                dens_mult ~ "Population Density (per km^2)",
+                pct_pov ~ "Percent in Poverty",
+                pct_white ~ "Percent White",
+                pct_black ~ "Percent Black",
+                pct_asian ~ "Percent Asian",
+                pct_hispanic ~ "Percent Hispanic"),
+             # statistic = all_continuous() ~ "{mean} ({sd})",
+              digits = all_continuous() ~ 2, 
+              missing = "no") %>% 
+  add_p() %>% 
+  add_overall() %>% 
+  bold_labels() %>% 
+ # modify_caption("Census Tract Characteristics, by RUCA Categorization -- Median (Q1, Q3)") %>% 
+  as_kable()
+
+table1
+
+# table1 <- table1 %>% as_gt()
+# gtsave(table1, "results/table1.png")
+
+```
 
 
+```{r, include = FALSE}
+  
+tract_ridges <- tract %>%
+   filter(!is.na(pm25), !is.na(pct_white)) %>%
+   mutate(
+     white_group = ntile(pct_white, 5),
+     white_group = factor(
+       white_group,
+       levels = 1:5,
+       labels = c("0-20%", 
+                  "20-40%",
+                  "40-60%",
+                  "60-80%", 
+                  "80-100%")))
+
+figure1 <- tract_ridges %>% ggplot(aes(x = pm25, y = white_group, fill = white_group)) +
+   geom_density_ridges(
+     alpha = 0.85,
+     scale = 1.2,
+     color = "white") +
+   theme_minimal() +
+   labs(
+     x = expression(PM[2.5]~"Concentration (µg/m"^3*")"),
+     y = "% White",
+     title = "Distribution of PM2.5 by % of White Census Tract Population") +
+   theme(legend.position = "none", 
+         plot.title = element_text(size = 12))
+
+# ggsave(filename = "results/figure1.png", plot = figure1, 
+ #       width = 8, height = 5, dpi = 300)
+
+
+tract_ridges <- tract %>%
+   filter(!is.na(bc), !is.na(pct_white)) %>%
+   mutate(
+     white_group = ntile(pct_white, 5),
+     white_group = factor(
+       white_group,
+       levels = 1:5,
+       labels = c("0-20%", 
+                  "20-40%",
+                  "40-60%",
+                  "60-80%", 
+                  "80-100%")))
+
+figure_bc <- tract_ridges %>% ggplot(aes(x = bc, y = white_group, fill = white_group)) +
+   geom_density_ridges(
+     alpha = 0.85,
+     scale = 1.2,
+     color = "white") +
+   theme_minimal() +
+   labs(
+     x = "Total Black Carbon Concentration",
+     y = "% White",
+     title = "Distribution of Black Carbon Concentration by % of White Census Tract Population") +
+   theme(legend.position = "none", 
+         plot.title = element_text(size = 12))
+
+# HyADS 
+
+tract_ridges <- tract %>%
+   filter(!is.na(hyads), !is.na(pct_white)) %>%
+   mutate(
+     white_group = ntile(pct_white, 5),
+     white_group = factor(
+       white_group,
+       levels = 1:5,
+       labels = c("0-20%", 
+                  "20-40%",
+                  "40-60%",
+                  "60-80%", 
+                  "80-100%")))
+
+figure_hyads <- tract_ridges %>% ggplot(aes(x = hyads, y = white_group, fill = white_group)) +
+   geom_density_ridges(
+     alpha = 0.85,
+     scale = 1.2,
+     color = "white") +
+   theme_minimal() +
+   labs(
+     x = "HyADS (Impact of Coal-Fired Power Plants)",
+     y = "% White",
+     title = "Distribution of HyADS by % of White Census Tract Population") +
+   theme(legend.position = "none", 
+         plot.title = element_text(size = 12))
+
+figure_hyads
+
+# ggsave(filename = "results/figure_hyads.png", plot = figure_hyads, 
+#        width = 8, height = 5, dpi = 300)
+
+```
+
+**Figure 1**: Distribution of PM2.5 by Rural-Urban Commuting Area and Code
+
+```{r, fig.align='center', fig.width=6, fig.height=4, warning = FALSE, message = FALSE}
+
+ruca_1 <- tract %>% ggplot(aes(x = pm25, y = ruca_agg, fill = ruca_agg)) +
+   geom_density_ridges(
+     alpha = 0.85,
+     scale = 1.2,
+     color = "white") +
+   theme_minimal() +
+   labs(
+     x = expression(PM[2.5]~"Concentration (µg/m"^3*")"),
+     y = "RUCA",
+     title = "Distribution of PM2.5 by Aggregated Rural-Urban Commuting Area") +
+   theme(legend.position = "none", 
+         plot.title = element_text(size = 12))
+
+ruca_2 <- tract %>% ggplot(aes(x = factor(ruca), y = pm25, color = factor(ruca))) +
+  geom_boxplot() +
+  theme_minimal() + 
+  labs(
+     x = "RUCA Code",
+     y = expression(PM[2.5]~"Concentration (µg/m"^3*")"),
+     title = "Distribution of PM2.5 by Rural-Urban Commuting Area Code") +
+   theme(legend.position = "none", 
+         plot.title = element_text(size = 12))
+
+grid.arrange(ruca_1, ruca_2, nrow = 2)
+
+```
+
+>
+
+**For the below, can include either the combined figure or just the PM2.5 figure!**
+
+**Figure 2**: Distribution of PM2.5 by % of White Census Tract Population
+
+```{r, fig.align='center', fig.width=6, fig.height=4, message = FALSE, warning = FALSE}
+
+figure1
+
+```
+
+```{r, fig.width=8, fig.height=11, fig.align='center', message = FALSE}
+
+grid.arrange(figure1, figure_bc, figure_hyads, nrow = 3)
+
+```
+
+
+**Figure 3**: 
+MAPS I will add them
+
+
+**Figure 4**: Racial Composition by PM2.5 Exposure Percentile
+
+```{r, fig.align='center', fig.width=8, fig.height=5, message = FALSE, warning = FALSE}
+
+pm_long <- race_long %>%
+  filter(!is.na(pm25)) %>% 
+  mutate(pm25_percentile = ntile(pm25, 5)) %>% 
+  mutate(pm25_percentile = factor(
+    pm25_percentile,
+       levels = 1:5,
+       labels = c("0-20%", 
+                  "20-40%",
+                  "40-60%",
+                  "60-80%", 
+                  "80-100%")))
+
+figure_pm_bar <- ggplot(pm_long, aes(x = factor(pm25_percentile),
+                 y = percent,
+                 fill = race)) +
+  geom_bar(stat = "identity", position = "stack") +
+  # facet_wrap(~ ruca_agg) +
+  labs(x = "PM2.5 Percentile",
+       y = "Proportion",
+       fill = "Race",
+       title = "Racial Composition by PM2.5 Exposure Percentile") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 12))
+
+figure_pm_bar
+
+```
+
+
+**Figure 5**: PM2.5 vs. of % Race of Census Tract Population
+
+```{r, fig.align='center', fig.width=8, fig.height=5, message = FALSE, warning = FALSE}
+
+figure3 <- race_long %>% 
+  ggplot(aes(x = percent, y = pm25, color = race)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(color = "black") +
+  facet_wrap(~race) +
+  theme_minimal() +
+  labs(x = "% of Census Tract Population",
+       y = PM[2.5]~"Concentration (µg/m"^3*")") +
+  theme(plot.title = element_text(size = 12))
+
+figure3
 
 ```

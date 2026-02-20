@@ -35,8 +35,6 @@ Summary Table(s)
 
 ```{r}
 
-# Density: # pple per sq mile
-
 table1 <- tract %>% 
   tbl_summary(include = c(pm25, hyads, bc, total, dens_mult, pct_pov, 
                           pct_white, pct_black, pct_asian, pct_hispanic),
