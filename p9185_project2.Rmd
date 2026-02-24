@@ -308,17 +308,17 @@ b <- gamm(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_l
 
 
 ## Use these GAMMs to obtain comparison between linear and smooth models
-#smooth_model <- gamm4(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
+smooth_model <- gamm4(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
 
-#linear_model <- gamm4(pm25~pct_white + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
+linear_model <- gamm4(pm25~pct_white + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
 
 
 #saveRDS(linear_model, "gam_linear2_model.rds")
 #saveRDS(smooth_model, "gam_smooth2_model.rds")
 
 
-linear_model <- readRDS("gam_linear2_model.rds")
-smooth_model <- readRDS("gam_smooth2_model.rds")
+#linear_model <- readRDS("gam_linear2_model.rds")
+#smooth_model <- readRDS("gam_smooth2_model.rds")
 
 anova(linear_model$mer, smooth_model$mer, test="Chisq")
 

@@ -17,6 +17,17 @@ library(maps)
 library(gt)
 library(tigris)
 library(sf)
+library(gamm4)
+library(mgcv)
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(glmmTMB)
+library(broom.mixed)
+library(performance)
+library(car)
+library(fixest)
+library(broom.helpers)
 library(purrr)
 
 ```
@@ -281,3 +292,344 @@ figure3 <- race_long %>%
 figure3
 
 ```
+
+# Modeling
+## Approach 1: Nested LMM
+
+## Approach 2: Cross classified Multilevel modeling (CCMM)
+```{r}
+############################# Data assessment ###########################
+
+cbsa_data  <- tract %>% mutate(state_fips = factor(state_fips),
+state_abb = factor(state_abb) ,
+county_fips = factor(county_fips),
+geoid = factor(geoid)    ,
+cbsa_id = factor(cbsa_id)   ,
+#ruca = factor(ruca)     ,
+ruca_agg = factor(ruca_agg),
+density_log = log(dens_mult))
+
+
+## Check the distinct count of states, cbsa, census tracts and county
+
+n_distinct(cbsa_data$state_abb) ## No Massachusetts, Wyoming
+n_distinct(cbsa_data$cbsa_id)
+n_distinct(cbsa_data$county_fips)
+n_distinct(cbsa_data$geoid)
+
+## Check for missingness in outcome
+
+sum(is.na(cbsa_data$pm25)) # 1 missing
+
+## Check the distribution of outcome
+
+hist(cbsa_data$pm25) ## normal data
+
+
+## Check whether data is actually nested or cross classified
+
+### 1. Does each tract belong to one CBSA?
+
+cbsa_data %>%
+  group_by(geoid) %>%
+  summarise(n_cbsa = n_distinct(cbsa_id)) %>%
+  filter(n_cbsa > 1) ## Truly nested
+
+### 2. Does each CBSA belong to only ONE state
+cbsa_data %>%
+  group_by(cbsa_id) %>%
+  summarise(n_states = n_distinct(state_fips)) %>%
+  filter(n_states > 1) ## 43 cbsa_ids appear in more than 1 state; not truly nested
+
+
+### Plot to show non-nested CBSAs
+cbsa_data %>%
+  group_by(cbsa_id) %>%
+  summarise(n_states = factor(n_distinct(state_fips))) %>% ggplot(aes(n_states)) + geom_bar() + labs(
+    #title = "Count of CBSA ",
+    x = "Number of states",        # x-axis label
+    y = "CBSA count"    # y-axis label
+  ) + theme_minimal() + scale_fill_viridis_d()
+
+
+
+  labs(
+    title = "Example Bar Plot",
+    x = "Category",        # x-axis label
+    y = "Count / Value"    # y-axis label
+  ) +
+  theme_minimal()
+
+
+## Check correlations and multicolinearity
+
+### Correlation
+#cor(cbsa_data[, c("pct_white","pct_hispanic","pct_black", "pct_pov", "dens_mult", "bc", "pm25", "ruca", "hyads")], use = "complete.obs")
+
+
+### Multicolinearity using non-nested model
+
+#vif(lm(pm25 ~ pct_white + pct_hispanic + pct_black + pct_pov + ruca_agg + dens + bc + hyads, data = cbsa_data))
+
+```
+
+
+```{r fig.height=15, fig.width=10,  fig.align='left'}
+
+# Justification:
+
+# Each tract belongs to one CBSA
+# Each tract belongs to one state
+# But CBSAs and states are not truly nested within each other i.e., cbsa crosses state boundaries
+      ## So tracts are simultaneously classified by:
+            ## Tract ∈ CBSA
+            ## Tract ∈ State
+# Can compute between cbsa and state variances as well as within tract variances
+
+# Limitations:
+
+## Assumes normal random effects
+## It doesn't handle spatial autocorrelation
+## If state doesn't contribute any variance it becomes an unneccessarily model complex with no benefit
+
+
+## Nested LMM 
+cc_model1 <- lmer(
+  pm25 ~ pct_white*pct_pov  + ruca_agg + density_log + 
+    #(1 | cbsa_id) +
+    (1 | state_abb/cbsa_id),
+  data = cbsa_data
+)
+
+
+## CCMM
+cc_model <- lmer(
+  pm25 ~ pct_white*pct_pov +  ruca_agg + density_log + 
+    (1 | cbsa_id) +
+    (1 | state_abb),
+  data = cbsa_data)
+
+#summary(cc_model)
+
+ #tidy(cc_model,  conf.int = TRUE) %>% knitr::kable() 
+
+## Compare models
+ anova(cc_model1, cc_model)
+
+######################## Model diagnostics ##############################
+
+ library(performance)
+
+compare_performance(cc_model1, cc_model)
+
+# save model diagnostics plot
+png("cclmm_diagnostics.png", width = 14*300, height = 14*300, res = 300)  
+check_model(cc_model)
+
+dev.off()
+
+## check distribution of random effects
+
+ranef_vals <- ranef(cc_model)
+hist(ranef_vals$cbsa_id[[1]], main="", xlab="Random effect: CBSA")
+hist(ranef_vals$state_abb[[1]], main="", xlab="Random effect: State")
+
+##  Model metrics
+model_performance(cc_model)
+
+
+################### create and save report-ready results table ##########
+
+model_tbl <- tbl_regression(
+  cc_model,
+  intercept = TRUE,
+  conf.int = TRUE,
+  estimate_fun = function(x) sprintf("%.4f", x),
+  label = list(pct_white ~ "Percent White in pop",
+               pct_pov ~ "Percent pop in pov",
+               ruca_agg ~ "Rural-Urban Commuting Area",
+               density_log ~ "Log density (people/sq km)")
+) %>%
+  bold_labels() %>%  modify_header(label ~ "Term") %>%  # rename 'Characteristic' -> 'Term'
+  modify_caption("**Cross-Classified Mixed Effects Model for PM2.5**") 
+
+
+model_tbl
+
+ as_gt(model_tbl) %>%
+  gt::gtsave("model_ccmm_results.png")
+
+
+```
+
+## Approach 3: Multiway cluster adjusted SE (CRSE)
+```{r}
+
+# Justifications:
+## This computes two-way clustered standard errors:
+## Clustered by CBSA
+## Clustered by State
+## Correcting for overlapping membership
+
+# Limitations
+## Does not estimate variance at CBSA or state level.
+  ## Cannot ICC: cannot attribute any variation to CBSA or state
+## Does NOT add CBSA or state intercepts
+## No cluster-level estimates
+## Does NOT change coefficient estimates
+## Leaves the model as simple OLS.
+  ## Only adjusts standard errors
+  ## Only adjusts the variance-covariance matrix.
+  ## Assumes independence across clusters
+
+cr_model <- feols(
+  pm25 ~ pct_white*pct_pov + ruca_agg + density_log,
+  data = cbsa_data,
+  cluster = ~ cbsa_id + state_abb)
+
+summary(cr_model)
+
+########################### Model diagnostics ##########################
+
+### compare cluster SEs
+
+library(data.table)
+
+coefs <- names(coef(cr_model))
+
+se_table <- data.table(
+  term = coefs,
+  cluster_cbsa   = sqrt(diag(vcov(cr_model, cluster = ~cbsa_id))),
+  cluster_state = sqrt(diag(vcov(cr_model, cluster = ~state_abb))),
+  cluster_both = sqrt(diag(vcov(cr_model, cluster = ~cbsa_id + state_abb)))
+)
+
+se_table <-  se_table %>% mutate(term = case_when(term == "pct_white" ~ "Percent White in pop",
+               term == "pct_pov" ~ "Percent pop in pov",
+               term == "ruca_agg" ~ "Rural-Urban Commuting Area",
+               term == "density_log" ~ "Log density (people/sq km)",
+               term == "pct_white:pct_pov" ~ "White X poverty", TRUE ~ term),
+               cluster_cbsa = round(cluster_cbsa, 4),
+               cluster_state = round(cluster_state, 4),
+               cluster_both = round(cluster_both, 4))
+
+se_table
+
+gt_table <- gt(se_table)
+
+# Save as PNG
+gtsave(gt_table, "se_table.png")
+
+## Quick model comparison using AIC and BIC
+
+AIC(cr_model)
+BIC(cr_model)
+AIC(cc_model)
+BIC(cc_model)
+
+################### create and save report-ready results table ##########
+
+cr_tbl <- tbl_regression(
+  cr_model,
+  intercept= TRUE,
+  conf.int = TRUE,
+  estimate_fun = function(x) sprintf("%.4f", x),
+  label = list(pct_white ~ "Percent White in pop",
+               pct_pov ~ "Percent pop in pov",
+               ruca_agg ~ "Rural-Urban Commuting Area",
+               density_log ~ "Log density (people/sq km)"
+               )
+) %>%
+  bold_labels() %>%  modify_header(label ~ "Term") %>%  # rename 'Characteristic' -> 'Term'
+  modify_caption("**Multiway cluster adjusted SE Model for PM2.5**") 
+
+as_gt(cr_tbl) %>%
+  gt::gtsave("model_crse_results.png")
+
+
+```
+
+## Approach 4: Generalized additive mixed models (GAMMs)
+```{r}
+
+# In GAMs beta coefficients from Linear Regression are replaced with a flexible function (splines) that allows nonlinear relationships 
+
+# Splines allow us to model non-linear relationships for each feature. The sum of many splines forms a GAM.The result is a highly flexible model which still has some of the explainability of a linear regression.
+
+## GAMM Using nlme for multilevel modeling part
+cbsa_data$state_cbsa <- interaction(cbsa_data$state_abb, cbsa_data$cbsa_id)
+
+gam_nlm <- gamm(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random = list(state_abb = ~1,
+                state_cbsa = ~1), method = "REML")
+
+########################### Model diagnostics ##########################
+
+## Use these GAMMs to obtain comparison between linear and smooth models (These GAMMS LMM part based on lme4)
+smooth_model <- gamm4(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
+
+linear_model <- gamm4(pm25~pct_white + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
+
+
+anova(linear_model$mer, smooth_model$mer, test="Chisq")
+
+# Plot smooth terms to assess non-linearity of relationship between pm2.5 and pct_white
+png("gam_smooth_plot.png", width = 800, height = 600, res = 120)
+
+plot(gam_nlm$gam, shade = TRUE, pages = 1)
+
+# Close device
+dev.off()
+
+
+logLik(gam_nlm$lme)
+AIC(gam_nlm$lme)
+BIC(gam_nlm$lme)
+gam_nlm$lme$sigma
+
+
+################### create and save report-ready results table ##########
+ ### Fixed effect part
+
+gam_tbl <- tbl_regression(
+  gam_nlm$lme,
+  intercept= TRUE,
+  conf.int = TRUE,
+  estimate_fun = function(x) sprintf("%.5f", x),
+  label = list(`Xs(pct_white)Fx1` ~ "Percent White in pop",
+               Xpct_pov ~ "Percent pop in pov",
+               Xruca_aggsuburban ~ "Urbanicity - Suburban",
+               Xruca_aggurban ~ "Urbanicity - Urban",
+               `Xdensity_log` ~ "Log density (people/sq km)",
+               `X(Intercept)` ~ "Intercept",
+               `Xpct_pov:pct_white` ~ "pct White X pct pov"
+               #bc ~ "Black carbon conc",
+               #hyads ~ "HyADS"
+               #pct_white:pct_pov ~ "White X pov",
+               #bc:hyads ~ " Black carbon X HyADS"
+               )
+) %>%
+  bold_labels() %>%  modify_header(label ~ "Term") %>%  # rename 'Characteristic' -> 'Term'
+  modify_caption("**Non-linear GAMM for PM2.5**") 
+
+as_gt(gam_tbl) %>%
+  gt::gtsave("model_gamm_results.png")
+
+## smooth terms part
+
+smooth_df <- as.data.frame(summary(b$gam)$s.table)
+smooth_df$term <- rownames(smooth_df)
+
+smooth_df <- smooth_df[, c("term", "edf", "F", "p-value")]
+colnames(smooth_df) <- c("term", "edf", "statistic", "p.value")
+
+smooth_df <-  smooth_df %>% mutate(p.value = case_when(p.value==0~"<0.001", TRUE~as.character(p.value)))
+
+
+smooth_df %>%
+  gt() %>%
+  tab_header(title = "Smooth Terms") %>%
+  gtsave("smooth_terms_gt.png")
+
+
+```
+
