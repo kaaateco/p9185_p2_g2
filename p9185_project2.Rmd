@@ -127,17 +127,16 @@ vif(lm(pm25 ~ pct_white + pct_hispanic + pct_black + pct_pov + ruca_agg + dens +
 
 ## Simple model with no interaction terms 
 cc_model1 <- lmer(
-  pm25 ~ pct_white*pct_pov  +   ruca_agg + new_density + 
+  pm25 ~ pct_white*pct_pov  + ruca_agg + log(new_density) + 
     #(1 | cbsa_id) +
     (1 | state_abb/cbsa_id),
   data = cbsa_data
 )
 
 
-
 ## Model with interaction terms and no black pct_black
 cc_model <- lmer(
-  pm25 ~ pct_white*pct_pov +  ruca_agg + new_density + 
+  pm25 ~ pct_white*pct_pov +  ruca_agg + log(new_density) + 
     (1 | cbsa_id) +
     (1 | state_abb),
   data = cbsa_data)
@@ -176,7 +175,7 @@ model_tbl <- tbl_regression(
   label = list(pct_white ~ "Percent White in pop",
                pct_pov ~ "Percent pop in pov",
                ruca_agg ~ "Rural-Urban Commuting Area",
-               new_density ~ "Density (people/sq km)"
+               `log(new_density)` ~ "Log density (people/sq km)"
                #bc ~ "Black carbon conc",
                #hyads ~ "HyADS"
                #pct_white:pct_pov ~ "White X pov",
@@ -243,7 +242,7 @@ model_plots
   ## Assumes independence across clusters
 
 cr_model <- feols(
-  pm25 ~ pct_white*pct_pov + ruca_agg + new_density,
+  pm25 ~ pct_white*pct_pov + ruca_agg + log(new_density),
   data = cbsa_data,
   cluster = ~ cbsa_id + state_abb)
 
@@ -257,7 +256,7 @@ cr_tbl <- tbl_regression(
   label = list(pct_white ~ "Percent White in pop",
                pct_pov ~ "Percent pop in pov",
                ruca_agg ~ "Rural-Urban Commuting Area",
-               new_density ~ "Density (people/sq km)"
+               `log(new_density)` ~ "Log density (people/sq km)"
                #bc ~ "Black carbon conc",
                #hyads ~ "HyADS"
                #pct_white:pct_pov ~ "White X pov",
@@ -287,7 +286,101 @@ BIC(cr_model)
 AIC(cc_model)
 BIC(cc_model)
 
-
 ```
 
+## Model approach 3: Generalized additive mixed models (GAMMs)
+```{r}
+
+library(gamm4)
+library(mgcv)
+
+# In GAMs beta coefficients from Linear Regression are replaced with a flexible function (splines) that allows nonlinear relationships 
+
+# Splines allow us to model non-linear relationships for each feature. The sum of many splines forms a GAM.The result is a highly flexible model which still has some of the explainability of a linear regression.
+
+## using nlme for multilevel modeling
+cbsa_data$state_cbsa <- interaction(cbsa_data$state_abb, cbsa_data$cbsa_id)
+
+cbsa_data$density_log <- log(cbsa_data$new_density)
+
+b <- gamm(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random = list(state_abb = ~1,
+                state_cbsa = ~1), method = "REML")
+
+
+## Use these GAMMs to obtain comparison between linear and smooth models
+#smooth_model <- gamm4(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
+
+#linear_model <- gamm4(pm25~pct_white + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random =~(1|state_abb / cbsa_id))
+
+
+#saveRDS(linear_model, "gam_linear2_model.rds")
+#saveRDS(smooth_model, "gam_smooth2_model.rds")
+
+
+linear_model <- readRDS("gam_linear2_model.rds")
+smooth_model <- readRDS("gam_smooth2_model.rds")
+
+anova(linear_model$mer, smooth_model$mer, test="Chisq")
+
+
+png("gam_smooth_plot.png", width = 800, height = 600, res = 120)
+
+# Plot smooth terms
+plot(b$gam, shade = TRUE, pages = 1)
+
+# Close device
+dev.off()
+
+
+summary(smooth_model$gam) ## summary of gam
+summary(smooth_model$mer) ## underlying mixed model
+
+logLik(smooth_model$mer)
+AIC(smooth_model$mer)
+BIC(smooth_model$mer)
+b$lme$sigma
+
+
+gam_tbl <- tbl_regression(
+  b$lme,
+  intercept= TRUE,
+  conf.int = TRUE,
+  estimate_fun = function(x) sprintf("%.5f", x),
+  label = list(`Xs(pct_white)Fx1` ~ "Percent White in pop",
+               Xpct_pov ~ "Percent pop in pov",
+               Xruca_aggsuburban ~ "Urbanicity - Suburban",
+               Xruca_aggurban ~ "Urbanicity - Urban",
+               `Xdensity_log` ~ "Log density (people/sq km)",
+               `X(Intercept)` ~ "Intercept",
+               `Xpct_pov:pct_white` ~ "pct White X pct pov"
+               #bc ~ "Black carbon conc",
+               #hyads ~ "HyADS"
+               #pct_white:pct_pov ~ "White X pov",
+               #bc:hyads ~ " Black carbon X HyADS"
+               )
+) %>%
+  bold_labels() %>%  modify_header(label ~ "Term") %>%  # rename 'Characteristic' -> 'Term'
+  modify_caption("**Non-linear GAMM for PM2.5**") 
+
+as_gt(gam_tbl) %>%
+  gt::gtsave("model_gamm_results.png")
+
+## smooth terms
+
+smooth_df <- as.data.frame(summary(b$gam)$s.table)
+smooth_df$term <- rownames(smooth_df)
+
+smooth_df <- smooth_df[, c("term", "edf", "F", "p-value")]
+colnames(smooth_df) <- c("term", "edf", "statistic", "p.value")
+
+smooth_df <-  smooth_df %>% mutate(p.value = case_when(p.value==0~"<0.001", TRUE~as.character(p.value)))
+
+library(gt)
+
+smooth_df %>%
+  gt() %>%
+  tab_header(title = "Smooth Terms") %>%
+  gtsave("smooth_terms_gt.png")
+
+```
 
