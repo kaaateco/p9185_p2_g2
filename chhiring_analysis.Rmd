@@ -4,17 +4,18 @@ author: "Chhiring Lama"
 date: "2026-02-17"
 output:
   pdf_document:
-    extra_dependencies: ["float"]
     toc: yes
     toc_depth: 2
 header-includes:
-- \usepackage{fancyhdr}
-- \usepackage{lipsum}
-- \pagestyle{fancy}
-- \fancyhead[R]{\thepage}
-- \fancypagestyle{plain}{\pagestyle{fancy}}
-- \usepackage{enumitem}
-- \usepackage{float}
+  - \usepackage{fancyhdr}
+  - \usepackage{lipsum}
+  - \pagestyle{fancy}
+  - \fancyhead[R]{\thepage}
+  - \fancypagestyle{plain}{\pagestyle{fancy}}
+  - \usepackage{enumitem}
+  - \usepackage{float}
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
 editor_options: 
   chunk_output_type: console
 ---
@@ -61,7 +62,7 @@ options(scipen = 999)
 ```{r, warning=FALSE, message=FALSE}
 tract <- read_csv("tract_cbsa.csv")
 tract <- tract |> 
-  mutate(dens = dens *1000000)
+  mutate(dens_v2 = dens *1000000)
 state_included <-unique(tract$state_abb)
 missing = setdiff(state.abb, state_included)
 ```
@@ -119,6 +120,33 @@ cbsa_map_data <- coords_df |>
 ggplot(cbsa_map_data, aes(`X`, `Y`, group = CBSA, fill = mean_pm)) +
   geom_polygon(color = "white", size = 0.2) +
   scale_fill_gradient(low = "blue", high = "red") +
+  labs(fill = "Mean PM2.5") +
+  theme_void()
+```
+
+
+```{r, fig.width = 5, fig.height =3}
+coords <- st_coordinates(cbsa_sf)
+coords_df <- as.data.frame(coords)
+coords_df <- cbind(
+  cbsa_sf[coords_df$L3, ] |> st_drop_geometry(),
+  coords_df
+) |> 
+  as_tibble()
+
+cbsa_pcthwite_summary <- tract %>%
+  group_by(`cbsa_id`) %>%
+  summarise(mean_pctwhite = mean(pct_white, na.rm = TRUE)) |> 
+  drop_na()
+
+cbsa_map_data <- coords_df |> 
+  mutate(`CBSA` = as.numeric(`CBSA`)) |> 
+  right_join(cbsa_pcthwite_summary, by = c("CBSA" = "cbsa_id"))
+
+ggplot(cbsa_map_data, aes(`X`, `Y`, group = CBSA, fill = mean_pctwhite)) +
+  geom_polygon(color = "white", size = 0.2) +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(fill = "% White Population") +
   theme_void()
 ```
 
@@ -130,22 +158,69 @@ cor_dat <- tract[, c(8:11, 13, 18:22)] |>
 cor_matrix <- cor(cor_dat, method = "pearson")
 corrplot(cor_matrix, method = "circle") 
 ```
-
 Percentage of white and percentage of population under poverty line are correlated. We need to account for this when modeling. 
+
+
+```{r, fig.height=4, fig.width=5, fig.align = "center"}
+### Plot PM2.5 change compared to POV and PCT_WHITE
+tract <- tract |> 
+  mutate(
+     pov_group = case_when(
+       pct_pov >= 0 & pct_pov <=25 ~ "0-25%", 
+       pct_pov > 25 & pct_pov <=50 ~ "25-50%",
+       pct_pov > 50 & pct_pov <=75 ~ "50-75%",
+       pct_pov > 75 & pct_pov <=100 ~ "75-100%"))
+ggplot(tract, aes(x = pct_white, y = pm25, color = pct_pov)) +
+  geom_point(size = 0.2) +
+  facet_wrap(~pov_group, scales = "fixed") + 
+  geom_smooth(se = FALSE) +
+  theme_classic()
+```
+
+```{r}
+ggplot(tract, aes(x = ruca_agg, y = dens_v2, fill = ruca_agg)) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(x = "Rural-Urban Commuting Area codes", y = "Population Density (#people/sq. km)") +
+  scale_y_log10()
+```
+
 
 Running LMM with hierarchical structure 
 ```{r}
 nested_mod <- lmerTest::lmer(pm25 ~ pct_white*pct_pov 
-                             + ruca_agg + dens + bc*hyads + (1 | state_abb/cbsa_id),
+                             + ruca_agg + dens_v2 + (1 | state_abb/cbsa_id),
                      data = tract)
+
+nested_mod |> 
+  broom.mixed::glance() |> 
+  knitr::kable(booktabs = TRUE, longtable = TRUE)  |> 
+  kable_styling(latex_options = "hold_position", font_size = 12)
+```
+
+<!-- $$ -->
+<!-- \begin{aligned} -->
+<!-- &\ Y_{ijk} = \beta_0 + \beta_1 \text{PCT_WHITE} + \beta_2 \text{PCT_POV} + \beta_{3} \text{(Area = Suburban)} +\\  -->
+<!-- &\ \ \ \ \ \ \ \  \beta_{3} \text{(Area = Urban)} + \beta_4 \text{Density} + \beta_5 \text{(PCT_WHITE x PCT_POV)} + b_{j(k)}{CSBA(State)},\\ -->
+<!-- &\ \ \ \ \ \ \ \  i = 1, .., 58030, j = 1, ...., 380, k = 1,..., 47 -->
+<!-- \end{aligned} -->
+<!-- $$ -->
+
+```{r}
 tbl_regression(
   nested_mod,
-  intercept = TRUE) |> 
+  intercept = TRUE,
+  estimate_fun = function(x) {
+    ifelse(abs(x) < 0.001,
+           formatC(x, format = "e", digits = 2),
+           formatC(x, format = "f", digits = 3))
+  }) |> 
   bold_p() |> 
   bold_labels() |> 
   as_gt() |> 
   tab_options(latex.tbl.pos = "h")
 ```
+
 
 Checking random effects too
 ```{r, fig.height=4}
@@ -210,7 +285,7 @@ ggplot(state_re, aes(x = reorder(state_abb, random_intercept), y = random_interc
 ```
 
 ### Model Diagnostics
-```{r, fig.height=10, fig.width=7,  fig.align='left'}
+```{r, fig.height=12, fig.width=10,  fig.align='left'}
 check_model(nested_mod)
 ```
 
@@ -228,12 +303,32 @@ plot_model(nested_mod, type = "int") +
 
 ```{r}
 nested_mod2 <- lmerTest::lmer(pm25 ~ pct_white*pct_pov + ruca + dens + 
-                              area + bc + hyads + (1| cbsa_id) + (1 | state_abb), 
+                              area + bc + (1| cbsa_id) + (1 | state_abb), 
                               data = tract)
 ```
 
 ```{r}
 anova(nested_mod2, nested_mod)
 ```
+
+###secondary outcome: BC
+```{r}
+bc_res <- lmerTest::lmer(bc ~ pct_white*pct_pov 
+               + ruca_agg + dens_v2  + (1 | state_abb/cbsa_id),
+               data = tract)
+tbl_regression(
+  bc_res,
+  intercept = TRUE,
+  estimate_fun = function(x) {
+    ifelse(abs(x) < 0.001,
+           formatC(x, format = "e", digits = 2),
+           formatC(x, format = "f", digits = 3))
+  }) |> 
+  bold_p() |> 
+  bold_labels() |> 
+  as_gt() |> 
+  tab_options(latex.tbl.pos = "h")
+```
+
 
 

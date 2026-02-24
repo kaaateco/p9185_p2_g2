@@ -29,7 +29,11 @@ library(car)
 library(fixest)
 library(broom.helpers)
 library(purrr)
-
+library(corrplot)
+library(kableExtra)
+library(DHARMa)
+library(gt)
+library(sjPlot)
 ```
 
 \newpage
@@ -50,11 +54,10 @@ race_long <- tract %>%
     cols = starts_with("pct"),
     names_to = "race",
     values_to = "percent") %>% 
-  mutate(race = recode(race,
-                       pct_white = "White",
-                       pct_black = "Black",
-                       pct_asian = "Asian",
-                       pct_hispanic = "Hispanic"))
+  mutate(race = case_when(race == "pct_white" ~ "White",
+                          race == "pct_black" ~ "Black",
+                          race == "pct_asian" ~ "Asian",
+                          race == "pct_hispanic" ~ "Hispanic"))
 
 ```
 
@@ -293,8 +296,160 @@ figure3
 
 ```
 
+**EDA: Variable Selection**
+
+Correlation
+```{r, fig.height=3.5, fig.align = "center"}
+cor_dat <- tract[, c(8:11, 23, 18:22)] |> 
+  mutate(bc = as.numeric(bc)) |> 
+  drop_na()
+cor_matrix <- cor(cor_dat, method = "pearson")
+corrplot(cor_matrix, method = "circle") 
+```
+
+POV VS WHITE VS PM2.5
+```{r, fig.height=4, fig.width=5, fig.align = "center"}
+### Plot PM2.5 change compared to POV and PCT_WHITE
+tract <- tract |> 
+  mutate(
+     pov_group = case_when(
+       pct_pov >= 0 & pct_pov <=25 ~ "0-25%", 
+       pct_pov > 25 & pct_pov <=50 ~ "25-50%",
+       pct_pov > 50 & pct_pov <=75 ~ "50-75%",
+       pct_pov > 75 & pct_pov <=100 ~ "75-100%"))
+ggplot(tract, aes(x = pct_white, y = pm25, color = pct_pov)) +
+  geom_point(size = 0.2) +
+  facet_wrap(~pov_group, scales = "fixed") + 
+  geom_smooth(se = FALSE) +
+  theme_classic()
+```
+
+## RUCA, density and PM2.5
+```{r}
+ggplot(tract, aes(x = ruca_agg, y = dens_mult, fill = ruca_agg)) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(x = "Rural-Urban Commuting Area codes", y = "Population Density (#people/sq. km)") +
+  scale_y_log10()
+```
+
+
 # Modeling
 ## Approach 1: Nested LMM
+```{r}
+nested_mod <- lmerTest::lmer(pm25 ~ pct_white*pct_pov 
+                             + ruca_agg + log(dens_mult) + (1 | state_abb/cbsa_id),
+                     data = tract)
+
+nested_mod |> 
+  broom.mixed::glance() |> 
+  knitr::kable(booktabs = TRUE, longtable = TRUE)  |> 
+  kable_styling(latex_options = "hold_position", font_size = 12)
+```
+
+<!-- $$ -->
+<!-- \begin{aligned} -->
+<!-- &\ Y_{ijk} = \beta_0 + \beta_1 \text{PCT_WHITE} + \beta_2 \text{PCT_POV} + \beta_{3} \text{(Area = Suburban)} +\\ -->
+<!-- &\ \ \ \ \ \ \ \  \beta_{3} \text{(Area = Urban)} + \beta_4 \text{log(Density)} + \beta_5 \text{(PCT_WHITE x PCT_POV)} + b_{j(k)}{CSBA(State)},\\ -->
+<!-- &\ \ \ \ \ \ \ \  i = 1, .., 58030, j = 1, ...., 380, k = 1,..., 47 -->
+<!-- \end{aligned} -->
+<!-- $$ -->
+
+```{r}
+tbl_regression(
+  nested_mod,
+  intercept = TRUE,
+  estimate_fun = function(x) {
+    ifelse(abs(x) < 0.001,
+           formatC(x, format = "e", digits = 2),
+           formatC(x, format = "f", digits = 3))
+  }) |> 
+  bold_p() |> 
+  bold_labels() |> 
+  as_gt() |> 
+  tab_options(latex.tbl.pos = "h")
+```
+
+Note for Interpretation: per 10% increase
+
+Checking random effects too
+```{r, fig.height=4}
+re <- ranef(nested_mod, condVar = TRUE)
+
+# Example: CBSA intercepts (nested in state)
+cbsa_re <- re$`cbsa_id:state_abb`  # random intercepts for CBSAs
+
+cbsa_re <- cbsa_re %>%
+  rownames_to_column(var = "cbsa_id") %>%
+  rename(random_intercept = `(Intercept)`)
+
+ggplot(cbsa_re, aes(x = random_intercept)) +
+  geom_histogram(binwidth = 0.1, fill = "steelblue", color = "white") +
+  theme_minimal() +
+  labs(title = "Distribution of Random Intercepts (CBSAs)",
+       x = "Random Intercept (Deviation from Overall Intercept)",
+       y = "Count")
+```
+
+CBSA RI within each state
+```{r, fig.height=4}
+re_cbsa <- ranef(nested_mod, condVar = TRUE)$`cbsa_id:state_abb`
+re_sd <- attr(re_cbsa, "postVar")[1,,] |> sqrt()  # standard deviation for intercept
+
+cbsa_re <- tibble(
+  cbsa_id = rownames(re_cbsa),
+  random_intercept = re_cbsa$`(Intercept)`,
+  sd = re_sd
+)
+
+ggplot(cbsa_re, aes(x = reorder(cbsa_id, random_intercept), y = random_intercept)) +
+  geom_errorbar(aes(ymin = random_intercept - 1.96*sd,
+                    ymax = random_intercept + 1.96*sd), width = 0.2, alpha = 0.4) +
+  geom_point(color = "steelblue", size = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(title = "Random Intercepts with 95% CI (CBSA)",
+       x = "CBSA",
+       y = "Random Intercept") +
+  theme_classic() +
+  theme(
+  axis.text.y = element_blank())
+```
+
+State-level RI
+```{r, fig.height=5, fig.width=5}
+state_re <- ranef(nested_mod)$state_abb %>%
+  rownames_to_column(var = "state_abb") %>%
+  rename(random_intercept = `(Intercept)`)
+
+ggplot(state_re, aes(x = reorder(state_abb, random_intercept), y = random_intercept)) +
+  geom_point(color = "darkred") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(title = "Random Intercepts by State",
+       x = "State",
+       y = "Random Intercept") +
+  theme_classic()+
+  theme(
+  axis.text.y = element_text(size = 7))
+```
+
+### Model Diagnostics
+```{r, fig.height=12, fig.width=10,  fig.align='left'}
+check_model(nested_mod)
+```
+
+### Prediction 
+```{r, fig.height=3, fig.width=4}
+plot_model(nested_mod, type = "pred", terms = c("pct_white", "pct_pov", "ruca_agg")) +
+  theme_classic()
+```
+
+### Prediction for log(dens)
+```{r, fig.height=3, fig.width=4}
+plot_model(nested_mod, type = "pred", terms = "dens_mult") +
+  theme_classic()
+```
 
 ## Approach 2: Cross classified Multilevel modeling (CCMM)
 ```{r}
@@ -559,8 +714,7 @@ as_gt(cr_tbl) %>%
 ## GAMM Using nlme for multilevel modeling part
 cbsa_data$state_cbsa <- interaction(cbsa_data$state_abb, cbsa_data$cbsa_id)
 
-gam_nlm <- gamm(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random = list(state_abb = ~1,
-                state_cbsa = ~1), method = "REML")
+gam_nlm <- gamm(pm25~s(pct_white) + pct_white:pct_pov + pct_pov + ruca_agg + density_log, data= cbsa_data,random = list(state_abb = ~1, state_cbsa = ~1), method = "REML")
 
 ########################### Model diagnostics ##########################
 
@@ -585,8 +739,9 @@ logLik(gam_nlm$lme)
 AIC(gam_nlm$lme)
 BIC(gam_nlm$lme)
 gam_nlm$lme$sigma
+```
 
-
+```{r}
 ################### create and save report-ready results table ##########
  ### Fixed effect part
 
@@ -616,7 +771,7 @@ as_gt(gam_tbl) %>%
 
 ## smooth terms part
 
-smooth_df <- as.data.frame(summary(b$gam)$s.table)
+smooth_df <- as.data.frame(summary(gam_nlm$gam)$s.table)
 smooth_df$term <- rownames(smooth_df)
 
 smooth_df <- smooth_df[, c("term", "edf", "F", "p-value")]
@@ -629,7 +784,24 @@ smooth_df %>%
   gt() %>%
   tab_header(title = "Smooth Terms") %>%
   gtsave("smooth_terms_gt.png")
+```
 
-
+### secondary outcome: BC
+```{r}
+bc_res <- lmerTest::lmer(bc ~ pct_white*pct_pov 
+               + ruca_agg + log(dens_mult)  + (1 | state_abb/cbsa_id),
+               data = tract)
+tbl_regression(
+  bc_res,
+  intercept = TRUE,
+  estimate_fun = function(x) {
+    ifelse(abs(x) < 0.001,
+           formatC(x, format = "e", digits = 2),
+           formatC(x, format = "f", digits = 3))
+  }) |> 
+  bold_p() |> 
+  bold_labels() |> 
+  as_gt() |> 
+  tab_options(latex.tbl.pos = "h")
 ```
 
