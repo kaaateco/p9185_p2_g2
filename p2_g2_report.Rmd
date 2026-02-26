@@ -34,6 +34,7 @@ library(kableExtra)
 library(DHARMa)
 library(gt)
 library(sjPlot)
+
 ```
 
 \newpage
@@ -377,7 +378,11 @@ pm_long <- race_long %>%
                   "60-80%", 
                   "80-100%")))
 
-figure_pm_bar <- ggplot(pm_long, aes(x = factor(pm25_percentile),
+pm_long_summary <- pm_long %>%
+  group_by(pm25_percentile, race) %>%
+  summarise(percent = mean(percent, na.rm = TRUE), .groups = "drop")
+
+figure_pm_bar <- ggplot(pm_long_summary, aes(x = factor(pm25_percentile),
                  y = percent,
                  fill = race)) +
   geom_bar(stat = "identity", position = "stack") +
